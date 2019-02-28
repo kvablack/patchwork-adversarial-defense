@@ -2,7 +2,7 @@ import os
 import numpy as np
 import cv2
 import h5py
-import nmslib
+from annoy import AnnoyIndex
 from collections import abc
 from tqdm import tqdm
 
@@ -13,6 +13,7 @@ def count_patches(width, height, size, stride):
     """
     return ((width - size[0]) // stride[0] + 1) * ((height - size[1]) // stride[1] + 1)
 
+NUM_FEATURES = 3
 def generate_features(image, size, stride):
     """
     The function used to extract features from patches for the purpose of patch-matching.
@@ -66,21 +67,24 @@ class PatchDatabaseGenerator:
     raw image data, and one index file with all of the feature data.
     """
 
-    NUM_FEATURES = 3
 
-    def __init__(self, img_folder, num=None, size=10, stride=5):
+    def __init__(self, img_folder, num=None, size=10, stride=5, n_trees=10):
         """
         Initializes a patch database generator with an image folder, a patch size, and a patch stride.
 
         Args:
             img_folder: The path to the folder containing the images.
-            num: The number of images from this folder to use. If None, all images in the folder will be used. (default: None)
-            size: The size of the patches to generate, in pixels. Either an int, in which case the patches will be square, or a
-                2-tuple of the form (width, height). (default: 10)
-            stride: The stride with which to generate patches, in pixels. Either an int, in which case the stride will be the same
-            horizontally and vertically, or a 2-tuple of the form (horizontal, vertical). (default: 5)
+            num: The number of images from this folder to use. If None, all images in the folder
+                will be used. (default: None)
+            size: The size of the patches to generate, in pixels. Either an int, in which case the
+                patches will be square, or a 2-tuple of the form (width, height). (default: 10)
+            stride: The stride with which to generate patches, in pixels. Either an int, in which
+                case the stride will be the same horizontally and vertically, or a 2-tuple of the form
+                (horizontal, vertical). (default: 5)
+            n_trees: The number of trees to use for building the index. See Annoy documentation (default: 10)
         """
         self.img_folder = img_folder
+        self.n_trees = n_trees
 
         if isinstance(size, abc.Iterable) and len(size) == 2 and all(isinstance(x, int) for x in stride):
             self.size = tuple(size)
@@ -101,40 +105,52 @@ class PatchDatabaseGenerator:
         except StopIteration:
             raise ValueError(f"cannot find image folder at path {img_folder}")
 
-    def _total_sizes(self):
+    def _count_pixels(self):
+        """Returns (total_pixels, total_patches) with current settings."""
         total_patches = 0
         total_pixels = 0
-        for filename in tqdm(self.file_list, "Evaluating image sizes"):
+        for filename in tqdm(self.file_list, "Counting pixels and patches"):
                 img = cv2.imread(os.path.join(self.img_folder, filename))
                 total_patches += count_patches(img.shape[0], img.shape[1], self.size, self.stride)
                 total_pixels += img.shape[0] * img.shape[1] * img.shape[2]
-        return total_patches, total_pixels
+        return total_pixels, total_patches
 
-    def size_estimate(self):
+    def print_info(self):
         """
-        Returns a size estimate, in bytes, for the combined image data and index file. Useful for
-        figuring out if the current size, stride, and number of images are reasonable.
-        Warning: probably an underestimate (due to image compression and various overhead).
+        Prints out various statistics for the dataset that will be created by `generate()`. Useful
+        for figuring out if the current size, stride, and number of images are reasonable.
         """
-        images_size = sum(os.path.getsize(os.path.join(self.img_folder, f)) for f in self.file_list)
-        return self._total_sizes()[0] * self.NUM_FEATURES * 32 / 8 + images_size
+        print(f"Image folder: {self.img_folder}")
+        print(f"Number of images to use: {len(self.file_list)}")
+        print(f"Patch size: {self.size[0]}x{self.size[1]}, stride: {self.stride[0]}x{self.stride[1]}")
+        print(f"Number of features per patch: {NUM_FEATURES}")
+        print(f"Number of trees (for index): {self.n_trees}")
+        total_pixels, total_patches = self._count_pixels()
+        print("Statistics:")
+        print(f"\tTotal number of pixels: {total_pixels:,}")
+        print(f"\tTotal number of patches: {total_patches:,}")
+        print(f"\tSize of image file on disk: {total_pixels * 3 / 10**6:,.2f} MB")
+        print(f"\tSize of features on disk: {total_patches * NUM_FEATURES * 4 / 10**6:,.2f} MB", end="\t")
+        print("<-- does not include extra indexing data, which depends on the number of trees and may be very significant")
 
-    def generate(self, images_file="images.hdf5", index_file="index.nms"):
+    def generate(self, images_file="images.hdf5", index_file="index.ann"):
         """
         Generate the patch database, consisting of one hdf5 file with all of the image data, and one
-        index file with all of the feature data and an indexing structure for nearest-neighbor searching.
+        index file with all of the feature data and an indexing structure for nearest-neighbor
+        searching.
 
         Args:
             images_file: The filename for the image data file. (default: 'images.hdf5')
             index_file: The filename for the index file. (default: 'index.nms')
         """
-        total_patches, total_pixels = self._total_sizes()
+        total_pixels, _ = self._count_pixels()
         with h5py.File(images_file, 'w') as f:
             image_data = f.create_dataset("image_data", (total_pixels,), dtype=np.uint8)  # actual image data, flattened
-            image_pointers = f.create_dataset("image_pointers", (len(self.file_list),), dtype=np.int)  # pointers into image data
-            image_shapes = f.create_dataset("image_shapes", (len(self.file_list), 3), dtype=np.int)  # shape info for each image region
+            image_pointers = f.create_dataset("image_pointers", (len(self.file_list),), dtype=np.int)  # pointers to mark start of each image
+            image_shapes = f.create_dataset("image_shapes", (len(self.file_list), 3), dtype=np.int)  # shape info for each image
             patch_counts = f.create_dataset("patch_counts", (len(self.file_list),), dtype=np.int)  # patch counts for each image
-            index = nmslib.init(method='hnsw', space='l2')  # HNSW index, which will also contain the feature vectors
+            index = AnnoyIndex(NUM_FEATURES, metric="euclidean")  # index, which will also hold feature data
+            index.on_disk_build(index_file)
 
             patch_counter = 0
             img_data_ptr = 0
@@ -148,30 +164,18 @@ class PatchDatabaseGenerator:
 
                 feature_batch = generate_features(img, self.size, self.stride)  # generate features
                 patch_counts[i] = len(feature_batch)   # save number of patches in this image
-                index.addDataPointBatch(np.array(feature_batch, dtype=np.float32),
-                                        ids=np.arange(patch_counter, patch_counter + len(feature_batch)))  # add to index
-                assert(len(feature_batch[0]) == self.NUM_FEATURES)
-
-                """width, height, channels = img.shape
-                index_grid = np.indices(img.shape)
-                # for each patch
-                for i, (x0, x1, y0, y1) in enumerate(convolution_indices(width, height, self.size, self.stride)):
-                    # project the patch coordinates onto the 1D flattened image array
-                    indices = np.ravel_multi_index(index_grid[:, x0:x1, y0:y1, :].reshape(3, -1), img.shape)
-                    # create a region reference to the region of the flattened array representing the patch
-                    patch_refs[patch_counter] = images.regionref[list(indices)]
-                    patch_counter += 1
-                """
+                for i, v in enumerate(feature_batch):
+                    index.add_item(patch_counter + i, np.array(v, dtype=np.float32))
 
                 patch_counter += len(feature_batch)
                 img_data_ptr += len(img_flat)
 
             f.attrs["size"] = self.size
             f.attrs["stride"] = self.stride
+            f.attrs["num_features"] = NUM_FEATURES
 
-            print("Indexing...")
-            index.createIndex(print_progress=True)
-            index.saveIndex(index_file)
+            print(f"Building index with {self.n_trees} trees...")
+            index.build(self.n_trees)
 
 
 class PatchDatabase:
@@ -183,7 +187,7 @@ class PatchDatabase:
         size: The patch size, in the form (height, width).
         stride: The stride used to originally generate the patches, in the form (horizontal, vertical).
     """
-    def __init__(self, images_file="images.hdf5", index_file="index.nms"):
+    def __init__(self, images_file="images.hdf5", index_file="index.ann"):
         """
         Initializes a patch database from an images file and an index file.
 
@@ -192,22 +196,40 @@ class PatchDatabase:
             index_file: Filename for file containing index and feature data (default: 'index.nms')
         """
         self.file = h5py.File(images_file, 'r')
+
+        if self.file.attrs["num_features"] != NUM_FEATURES:
+            raise ValueError(f"Image data file {images_file} was created with {self.file.attrs['num_features']} features, whereas feature extraction is currently using {NUM_FEATURES} features. Versions are incompatible.")
+
         self.size = tuple(self.file.attrs["size"])
         self.stride = tuple(self.file.attrs["stride"])
+        self.images_file = images_file
+        self.index_file = index_file
         # load patch counts and compute cumulative sums
         self.cumulative_patch_counts = np.cumsum(np.insert(self.file["patch_counts"], 0, 0))
 
-        self.index = nmslib.init(method='hnsw', space='l2')
-        print("Loading index...")
-        self.index.loadIndex(index_file, print_progress=True)
+        self.index = AnnoyIndex(NUM_FEATURES, metric="euclidean")
+        self.index.load(index_file)
+
+    def print_info(self):
+        """
+        Prints out various information about the loaded patch database.
+        """
+        print(f"Patch database loaded from image data file {self.images_file} and index file {self.index_file}")
+        print(f"\tNumber of images: {len(self.file['image_shapes'])}")
+        print(f"\tPatch size: {self.size[0]}x{self.size[1]}, stride: {self.stride[0]}x{self.stride[1]}")
+        print(f"\tNumber of features per patch: {NUM_FEATURES}")
+        print(f"\tNumber of trees in index: {self.index.get_n_trees()}")
+        print(f"\tTotal number of pixels: {len(self.file['image_data']):,}")
+        print(f"\tTotal number of patches: {self.index.get_n_items():,}")
 
     def create_patchwork(self, image):
         """
         Turns an input image into patchwork.
 
         Args:
-            image: String or numpy array. If it is a string, it will be treated as a filename, and load the corresponding
-                image will be loaded from disk. If it is a numpy array, it must have shape (width, height, channels).
+            image: String or numpy array. If it is a string, it will be treated as a filename, and
+                the corresponding image will be loaded from disk. If it is a numpy array, it must
+                have shape (width, height, channels).
 
         Returns:
             Numpy array of the form (width, height, channels) representing the patchwork image.
@@ -217,7 +239,7 @@ class PatchDatabase:
 
         # generate features and query database for nearest neighbors for each patch
         feature_batch = generate_features(image, self.size, self.size)
-        query_result = [ids[0] for ids, _ in self.index.knnQueryBatch(feature_batch, k=1)]
+        query_result = [self.index.get_nns_by_vector(v, 1)[0] for v in feature_batch]
 
         # perform patch substitutions with nearest neighbors
         patchwork = np.empty_like(image)
