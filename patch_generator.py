@@ -69,9 +69,9 @@ def images(directory, output, num, dry_run):
 @click.option("-t", "--num-trees", default=10, type=click.IntRange(min=1, max=None),
               help="Number of trees to use for building the Annoy index (default 10)")
 @click.option("-p", "--num-components", default=0, type=click.IntRange(min=0, max=None),
-              help="Number of components to keep for PCA dimensionality reduction. If 0 or not specified, the user will be shown the cumulative variance ratios and then prompted for num-components after the PCA is fitted.")
+              help="Number of components to keep for PCA dimensionality reduction. If 0 or not specified, PCA will be skipped completely and all pixels from each patch will be used.")
 @click.option("-b", "--batch-size", default=10000, type=click.IntRange(min=1, max=None),
-              help="Batch size to use for fitting and applying the PCA (default 10000)")
+              help="Batch size to use for fitting and applying the PCA, only has an effect if num-components is set to a nonzero value (default 10000)")
 @click.option("--dry-run", is_flag=True,
               help="Instead of actually generating the index, print some useful info and then exit")
 def index(imgfile, outfile, size, stride, num, num_trees, num_components, batch_size, dry_run):
@@ -103,7 +103,11 @@ def index(imgfile, outfile, size, stride, num, num_trees, num_components, batch_
     if (num == 0 or num > num_images):
         num = num_images
 
-    truncate = num_components == 0
+    if num_components == 0:
+        skip = True
+        num_components = size[0] * size[1] * f['image_shapes'][0][2]
+    else:
+        skip = False
 
     total_patches = count_patches(f["image_shapes"][:num], size, stride)
     if dry_run:
@@ -111,55 +115,39 @@ def index(imgfile, outfile, size, stride, num, num_trees, num_components, batch_
         click.echo(f"Number of images to use: {num}")
         click.echo(f"Patch size: {size[0]}x{size[1]}, stride: {stride[0]}x{stride[1]}")
         click.echo(f"Number of trees (for index): {num_trees}")
-        click.echo(f"Number of components to keep: {'unknown' if truncate else num_components}")
+        click.echo(f"Number of components to keep: {'all' if skip else num_components}")
         click.echo("Statistics:")
         click.echo(f"\tTotal number of patches: {total_patches:,}")
-        if not truncate:
-            click.echo(f"\tEstimated size of vectors on disk: {total_patches * num_components * 4 / 10**6:,.2f} MB", nl=False)
-            click.echo("\t<-- does not include extra indexing data, which depends on the number of trees and may be very significant")
-        else:
-            click.echo(f"\tEstimated size of vectors on disk, assuming 100 components kept: {total_patches * 100 * 4 / 10**6:,.2f} MB", nl=False)
-            click.echo("\t<-- does not include extra indexing data, which depends on the number of trees and may be very significant")
+        click.echo(f"\tEstimated size of vectors on disk: {total_patches * num_components * 4 / 10**6:,.2f} MB", nl=False)
+        click.echo("\t<-- does not include extra indexing data, which depends on the number of trees and may be very significant")
     else:
-        click.echo(f"Fitting PCA on {total_patches:,} vectors with {size[0] * size[1] * 3:,} dimensions...")
-        if truncate:
-            pca = IncrementalPCA()
-        else:
-            pca = IncrementalPCA(n_components=num_components)
-        patches = gen_patches_from_image_data(f["image_data"], f["image_pointers"], f["image_shapes"], size, stride)
-        for i in tqdm(range(0, total_patches, batch_size), "Overall progress"):
-            # batch = [next(patches) for _ in range(batch_size)]
-            batch = []
-            loop = tqdm(range(min(batch_size, total_patches - 1)), "Loading patches into memory")
-            batch = [next(patches) for _ in loop]
-            # loop.set_description("Performing PCA fit...") doesn't work
-            pca.partial_fit(batch)
-
-        if truncate:
-            click.echo(f"Cumulative explained variance for each number of components kept:")
-            for i, v in enumerate(np.cumsum(pca.explained_variance_ratio_)):
-                click.echo(f"{i + 1}: {v}")
-            while True:
-                try:
-                    num_components = int(input("Choose a number of components to keep: "))
-                    if num_components > len(batch[0]):
-                        raise ValueError
-                    break
-                except ValueError:
-                    click.echo(f"Please enter a valid integer in the range 1 to {len(batch[0])}")
-
+        patches = gen_patches_from_image_data(f["image_data"], f["image_pointers"][:num], f["image_shapes"][:num], size, stride)
         index = AnnoyIndex(num_components, metric="euclidean")  # index, which will also hold feature data
         index.on_disk_build(outfile)
-        click.echo(f"Performing PCA transform down to {num_components} dimensions...")
-        patches = gen_patches_from_image_data(f["image_data"], f["image_pointers"], f["image_shapes"], size, stride)
-        for i in tqdm(range(0, total_patches, batch_size), "Overall progress"):
-            # batch = [next(patches) for _ in range(batch_size)]
-            batch = []
-            for _ in tqdm(range(min(batch_size, total_patches - i)), "Loading patches into memory"):
-                batch.append(next(patches))
-            out = pca.transform(batch)
-            for j, k in enumerate(range(i, min(i + batch_size, total_patches))):
-                index.add_item(k, out[j][:num_components])
+        if skip:
+            pca = None
+            for i, patch in tqdm(enumerate(patches), "Loading patches into index", total=total_patches):
+                index.add_item(i, patch)
+        else:
+            click.echo(f"Fitting PCA on {total_patches:,} vectors with {size[0] * size[1] * f['image_shapes'][0][2]:,} dimensions...")
+            pca = IncrementalPCA(n_components=num_components)
+            for i in tqdm(range(0, total_patches, batch_size), "Overall progress"):
+                # batch = [next(patches) for _ in range(batch_size)]
+                loop = tqdm(range(min(batch_size, total_patches - 1)), "Loading patches into memory")
+                batch = [next(patches) for _ in loop]
+                # loop.set_description("Performing PCA fit...") doesn't work
+                pca.partial_fit(batch)
+
+            click.echo(f"Performing PCA transform down to {num_components} dimensions...")
+            patches = gen_patches_from_image_data(f["image_data"], f["image_pointers"], f["image_shapes"], size, stride)
+            for i in tqdm(range(0, total_patches, batch_size), "Overall progress"):
+                # batch = [next(patches) for _ in range(batch_size)]
+                batch = []
+                for _ in tqdm(range(min(batch_size, total_patches - i)), "Loading patches into memory"):
+                    batch.append(next(patches))
+                out = pca.transform(batch)
+                for j, k in enumerate(range(i, min(i + batch_size, total_patches))):
+                    index.add_item(k, out[j][:num_components])
 
         click.echo(f"\nBuilding index on {total_patches:,} vectors of size {num_components} with {num_trees} trees...")
         index.build(num_trees)

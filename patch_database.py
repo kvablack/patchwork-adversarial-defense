@@ -82,7 +82,10 @@ class PatchDatabase:
         if print_progress:
             loop = tqdm(desc=f"Querying {num} patches...", total=num)
         patches = np.array([patch.ravel() for patch in gen_patches_from_image(image, self.size, self.size)])
-        transformed = self.pca.transform(patches)
+        if self.pca is None:
+            transformed = patches
+        else:
+            transformed = self.pca.transform(patches)
         query_result = [self.index.get_nns_by_vector(v[:self.dims], 1)[0] for v in transformed]
 
         # perform patch substitutions with nearest neighbors
