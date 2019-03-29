@@ -5,6 +5,8 @@ h5py==2.9.0
 annoy==1.15.1
 opencv-python==4.0.0.21
 tqdm==4.31.1
+scikit-learn==0.20.3
+click==7.0
 
 # pytorch 0.4.1
 http://download.pytorch.org/whl/cpu/torch-0.4.1.post2-cp37-cp37m-linux_x86_64.whl
