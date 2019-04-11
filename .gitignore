@@ -158,3 +158,11 @@ tags
 [._]*.un~
 
 # End of https://www.gitignore.io/api/vim,python,jupyternotebook,jupyternotebooks
+
+# Data and scratch files
+data/
+models/
+scratch/
+
+# PyCharm files
+.idea/
