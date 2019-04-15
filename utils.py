@@ -1,6 +1,6 @@
 import numpy as np
 import os
-import cv2
+from PIL import Image
 from tqdm import tqdm
 
 def convolution_indices(width, height, size, stride):
@@ -52,7 +52,7 @@ def count_pixels(img_folder, file_list, print_progress=False):
     else:
         loop = file_list
     for filename in loop:
-        img = cv2.imread(os.path.join(img_folder, filename))
+        img = np.array(Image.open(os.path.join(img_folder, filename)))
         total_pixels += img.shape[0] * img.shape[1] * img.shape[2]
     loop.close()
     return total_pixels

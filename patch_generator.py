@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import cv2
+from PIL import Image
 import h5py
 from annoy import AnnoyIndex
 from tqdm import tqdm
@@ -43,12 +43,12 @@ def images(directory, output, num, dry_run):
         f = h5py.File(output)
         f.attrs["num"] = len(file_list)
         image_data = f.create_dataset("image_data", (total_pixels,), dtype=np.uint8)  # actual image data, flattened
-        image_pointers = f.create_dataset("image_pointers", (len(file_list),), dtype=np.int)  # pointers to mark start of each image
-        image_shapes = f.create_dataset("image_shapes", (len(file_list), 3), dtype=np.int)  # shape info for each image
+        image_pointers = f.create_dataset("image_pointers", (len(file_list),), dtype=np.uint64)  # pointers to mark start of each image
+        image_shapes = f.create_dataset("image_shapes", (len(file_list), 3), dtype=np.uint32)  # shape info for each image
 
         img_data_ptr = 0
         for i, filename in enumerate(tqdm(file_list, "Writing image data to disk")):
-            img = cv2.imread(os.path.join(directory, filename))  # read image from disk
+            img = np.array(Image.open(os.path.join(directory, filename)))  # read image from disk
             image_shapes[i] = img.shape
             image_pointers[i] = img_data_ptr
 
@@ -61,7 +61,7 @@ def images(directory, output, num, dry_run):
 
 @cli.command()
 @click.argument("imgfile", type=click.File("rb+"))
-@click.argument("outfile", type=click.Path(exists=True))
+@click.argument("outfile", type=click.Path())
 @click.argument("size", type=click.STRING)
 @click.argument("stride", type=click.STRING)
 @click.option("-n", "--num", default=0, type=click.IntRange(min=0, max=None),
@@ -118,7 +118,8 @@ def index(imgfile, outfile, size, stride, num, num_trees, num_components, batch_
         click.echo(f"Number of components to keep: {'all' if skip else num_components}")
         click.echo("Statistics:")
         click.echo(f"\tTotal number of patches: {total_patches:,}")
-        click.echo(f"\tEstimated size of vectors on disk: {total_patches * num_components * 4 / 10**6:,.2f} MB", nl=False)
+        num_vectors = total_patches * num_components * 4 / 10**6
+        click.echo(f"\tEstimated size of vectors on disk: {num_vectors:,.2f} MB", nl=False)
         click.echo("\t<-- does not include extra indexing data, which depends on the number of trees and may be very significant")
     else:
         patches = gen_patches_from_image_data(f["image_data"], f["image_pointers"][:num], f["image_shapes"][:num], size, stride)

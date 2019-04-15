@@ -1,7 +1,7 @@
 import numpy as np
 import h5py
 import pickle
-import cv2
+from PIL import Image
 import os
 from tqdm import tqdm
 from annoy import AnnoyIndex
@@ -76,7 +76,7 @@ class PatchDatabase:
             Numpy array of the form (width, height, channels) representing the patchwork image.
         """
         if isinstance(image, str):
-            image = cv2.imread(image)
+            image = np.array(Image.open(image))
 
         num = num_patches(image.shape[0], image.shape[1], self.size, self.size)
         if print_progress:
