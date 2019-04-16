@@ -2,7 +2,6 @@ import numpy as np
 import h5py
 import pickle
 from PIL import Image
-import os
 from tqdm import tqdm
 from annoy import AnnoyIndex
 
@@ -29,13 +28,7 @@ class PatchDatabase:
         self.index_file = index_file
         self.file = h5py.File(images_file, 'r')
 
-        with open(index_file, "rb") as f:
-            with open("index.tmp", "wb") as f2:
-                while True:
-                    data = f.readline()
-                    if data == b"BEGIN PICKLE SEGMENT\n":
-                        break
-                    f2.write(data)
+        with open(index_file + ".meta", "rb") as f:
             metadata = pickle.load(f)
             self.pca = pickle.load(f)
 
@@ -48,7 +41,7 @@ class PatchDatabase:
         self.cumulative_patch_counts = np.cumsum(np.insert(np.array(counts), 0, 0))
 
         self.index = AnnoyIndex(self.dims, metric="euclidean")
-        self.index.load("index.tmp")
+        self.index.load(index_file)
 
     def print_info(self):
         """
@@ -62,7 +55,7 @@ class PatchDatabase:
         print(f"\tTotal number of pixels: {len(self.file['image_data']):,}")
         print(f"\tTotal number of patches: {self.index.get_n_items():,}")
 
-    def create_patchwork(self, image, print_progress=False):
+    def create_patchwork(self, image, k=-1, print_progress=False):
         """
         Turns an input image into patchwork.
 
@@ -70,6 +63,9 @@ class PatchDatabase:
             image: String or numpy array. If it is a string, it will be treated as a filename, and
                 the corresponding image will be loaded from disk. If it is a numpy array, it must
                 have shape (width, height, channels).
+            k: The search_k parameter to use for nearest neighbors. The higher the value, the
+                slower and more accurate the search. Defaults to somewhere around n_trees, see
+                Annoy documentation for more details.
             print_progress: Whether or not to print progress using tqdm (default: False)
 
         Returns:
@@ -86,7 +82,8 @@ class PatchDatabase:
             transformed = patches
         else:
             transformed = self.pca.transform(patches)
-        query_result = [self.index.get_nns_by_vector(v[:self.dims], 1)[0] for v in transformed]
+
+        query_result = [self.index.get_nns_by_vector(v[:self.dims], 1, search_k=k)[0] for v in transformed]
 
         # perform patch substitutions with nearest neighbors
         patchwork_conv_indices = convolution_indices(image.shape[0], image.shape[1], self.size, self.size)
@@ -101,7 +98,7 @@ class PatchDatabase:
             image_index = np.searchsorted(self.cumulative_patch_counts, patch_index, side="right") - 1
             patch_num = patch_index - self.cumulative_patch_counts[image_index]
 
-            ptr = self.file["image_pointers"][image_index]
+            ptr = np.asscalar(self.file["image_pointers"][image_index])
             width, height, channels = self.file["image_shapes"][image_index]
             tx0, tx1, ty0, ty1 = nth_convolution_indices(patch_num, width, height, self.size, self.stride)
 
@@ -116,6 +113,3 @@ class PatchDatabase:
 
         loop.close()
         return patchwork
-
-    def __del__(self):
-        os.remove("index.tmp")

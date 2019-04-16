@@ -154,8 +154,7 @@ def index(imgfile, outfile, size, stride, num, num_trees, num_components, batch_
         index.build(num_trees)
 
         # save the pca info as well as additional metadata
-        with open(outfile, "ab") as f:
-            f.write(b"\nBEGIN PICKLE SEGMENT\n")
+        with open(outfile + ".meta", "ab") as f:
             metadata = {
                 "dims": num_components,
                 "size": size,
