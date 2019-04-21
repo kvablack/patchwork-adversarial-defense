@@ -102,14 +102,14 @@ class PatchDatabase:
             width, height, channels = self.file["image_shapes"][image_index]
             tx0, tx1, ty0, ty1 = nth_convolution_indices(patch_num, width, height, self.size, self.stride)
 
-            # image = self.file["image_data"][ptr:ptr + width * height * channels].reshape(width, height, channels)
-            # patchwork[x0:x1, y0:y1, :] = image[tx0:tx1, ty0:ty1, :]
+            image = self.file["image_data"][ptr:ptr + width * height * channels].reshape(width, height, channels)
+            patchwork[x0:x1, y0:y1, :] = image[tx0:tx1, ty0:ty1, :]
 
             # read patch from disk column by column
-            for x, tx in zip(range(x0, x1), range(tx0, tx1)):
+            """for x, tx in zip(range(x0, x1), range(tx0, tx1)):
                 start = (height * tx + ty0) * channels
                 end = (height * tx + ty1) * channels
-                patchwork[x, y0:y1, :] = self.file["image_data"][ptr + start:ptr + end].reshape(-1, channels)
+                patchwork[x, y0:y1, :] = self.file["image_data"][ptr + start:ptr + end].reshape(-1, channels)"""
 
         loop.close()
         return patchwork
